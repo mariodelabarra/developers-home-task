@@ -1,5 +1,7 @@
 ﻿using ExchangeRateUpdater.Models;
 using ExchangeRateUpdater.Services;
+using FluentAssertions;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Moq;
@@ -14,6 +16,7 @@ namespace ExchangeRateUpdater.Tests.Services
         private readonly Mock<HttpMessageHandler> _handlerMock;
         private readonly Mock<ILogger<ExchangeRateProvider>> _loggerMock;
         private readonly Mock<IOptions<CNBConfigurationOptions>> _optionsMock;
+        private readonly Mock<IMemoryCache> _memoryCacheMock;
 
         private readonly ExchangeRateProvider _provider;
 
@@ -31,25 +34,47 @@ namespace ExchangeRateUpdater.Tests.Services
             });
 
             _loggerMock = new Mock<ILogger<ExchangeRateProvider>>();
+            _memoryCacheMock = new Mock<IMemoryCache>();
 
-            _provider = new ExchangeRateProvider(_optionsMock.Object, httpClient, _loggerMock.Object);
+            _provider = new ExchangeRateProvider(_optionsMock.Object, _memoryCacheMock.Object, httpClient, _loggerMock.Object);
         }
 
         [Fact]
-        public async Task GetExchangeRates_ReturnsExpectedRates()
+        public async Task GetExchangeRates_ReturnsCachedData_WhenCacheHit()
         {
             //Arrange
-            BuildingRequestSucceed();
-            var currencies = new List<Currency> { new("USD"), new("EUR") };
+            var fakeRates = new List<ExchangeRate>() { new ExchangeRate(new("CZK"), new("USD"), 0.045m)};
+            object outValue = fakeRates;
+
+            var currencies = new List<Currency> { new("USD") };
+
+            _memoryCacheMock
+                .Setup(cache => cache.TryGetValue("ExchangeRatesCache", out outValue))
+                .Returns(true);
 
             //Act
             var rates = await _provider.GetExchangeRates(currencies);
 
-            // Assert
-            var rateList = rates.ToList();
-            Assert.Equal(2, rateList.Count);
-            Assert.Contains(rateList, r => r.TargetCurrency.Code == "USD" && r.Value == 20.988m);
-            Assert.Contains(rateList, r => r.TargetCurrency.Code == "EUR" && r.Value == 24.615m);
+            //Assert
+            rates.Should().ContainSingle()
+                .Which.TargetCurrency.Code.Should().Be("USD");
+        }
+
+        [Fact]
+        public async Task GetExchangeRates_FetchesDataAndStoresInCache_WhenCacheMiss()
+        {
+            //Arrange
+            SettingUpFetchesDataAndStoresInCache();
+            BuildingRequestSucceed();
+            var currencies = new List<Currency> { new("USD") };
+
+            //Act
+            var rates = await _provider.GetExchangeRates(currencies);
+
+            //Assert
+            rates.Should().ContainSingle()
+                .Which.TargetCurrency.Code.Should().Be("USD");
+            rates.Single().Value.Should().Be(22.222m);
         }
 
         [Fact]
@@ -73,6 +98,7 @@ namespace ExchangeRateUpdater.Tests.Services
         public async Task GetExchangeRates_NoMatchingCurrencies_ReturnsEmpty()
         {
             //Arrange
+            SettingUpFetchesDataAndStoresInCache();
             BuildingRequestSucceed();
             var currencies = new List<Currency> { new("CAD")};
 
@@ -101,7 +127,7 @@ namespace ExchangeRateUpdater.Tests.Services
             var rates = await _provider.GetExchangeRates(currencies);
 
             // Assert
-            Assert.Empty(rates);
+            rates.Should().BeEmpty();
             _loggerMock.Verify(x => x.Log(
                 LogLevel.Error,
                 It.IsAny<EventId>(),
@@ -115,18 +141,31 @@ namespace ExchangeRateUpdater.Tests.Services
             var xmlContent = @"<?xml version=""1.0"" encoding=""UTF-8""?>
                 <kurzy banka=""CNB"" datum=""23.07.2025"" poradi=""141"">
                     <tabulka typ=""XML_TYP_CNB_KURZY_DEVIZOVEHO_TRHU"">
-                        <radek kod=""EUR"" mena=""euro"" mnozstvi=""1"" kurz=""24,615"" zeme=""EMU""/>
-                        <radek kod=""USD"" mena=""dolar"" mnozstvi=""1"" kurz=""20,988"" zeme=""USA""/>
-                        <radek kod=""GBP"" mena=""libra"" mnozstvi=""1"" kurz=""28,405"" zeme=""Velká Británie""/>
+                        <radek kod=""USD"" mena=""dolar"" mnozstvi=""1"" kurz=""22.222"" zeme=""USA""/>
                     </tabulka>
                 </kurzy>";
+
             var response = new HttpResponseMessage
             {
-                Content = new StringContent(xmlContent, Encoding.UTF8, "application/xml")
+                StatusCode = HttpStatusCode.OK,
+                Content = new StringContent(xmlContent)
             };
+
             _handlerMock.Protected()
                 .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
                 .ReturnsAsync(response);
+        }
+
+        private void SettingUpFetchesDataAndStoresInCache()
+        {
+            object randomObject;
+            _memoryCacheMock
+                .Setup(cache => cache.TryGetValue("ExchangeRatesCache", out randomObject))
+                .Returns(false);
+
+            _memoryCacheMock
+                .Setup(m => m.CreateEntry(It.IsAny<object>()))
+                .Returns(Mock.Of<ICacheEntry>);
         }
     }
 }
