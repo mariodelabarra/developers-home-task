@@ -1,5 +1,6 @@
 ﻿using ExchangeRateUpdater.Extensions;
 using ExchangeRateUpdater.Models;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Xml;
@@ -20,17 +21,21 @@ namespace ExchangeRateUpdater.Services
     public class ExchangeRateProvider : IExchangeRateProvider
     {
         private readonly ILogger<ExchangeRateProvider> _logger;
+        private readonly IMemoryCache _cache;
         private readonly HttpClient _httpClient;
         private readonly string _url;
 
         private const string DefaultExchangeCode = "CZK";
+        private const string DefaultCacheKey = "ExchangeRatesCache";
 
         public ExchangeRateProvider(IOptions<CNBConfigurationOptions> options,
+            IMemoryCache cache,
             HttpClient httpClient,
             ILogger<ExchangeRateProvider> logger)
         {
             _httpClient = httpClient;
             _logger = logger;
+            _cache = cache;
 
             _url = options.Value.DataURL;
         }
@@ -51,23 +56,32 @@ namespace ExchangeRateUpdater.Services
 
             try
             {
+                if(!_cache.TryGetValue(DefaultCacheKey, out IEnumerable<ExchangeRate> cachedRates))
+                {
+                    _logger.LogInformation("GetExchangeRates: Getting list of exchange rates from {CNBURL}", _url);
+                    var response = await _httpClient.GetAsync(_url);
+                    response.EnsureSuccessStatusCode();
+
+                    var responseString = await response.Content.ReadAsStringAsync();
+                    var doc = XDocument.Parse(responseString);
+
+                    cachedRates = doc.Descendants("radek")
+                        .Select(attr => new ExchangeRate(
+                                new(DefaultExchangeCode),
+                                new(attr.GetExchangeCode()),
+                                attr.GetExchangeRate() / attr.GetExchangeAmount())
+                        );
+
+                    // Store in cache for 1 hour
+                    _cache.Set(DefaultCacheKey, cachedRates, TimeSpan.FromHours(1));
+                }
+
                 var currencyCodes = currencies.Select(c => c.Code).ToHashSet();
 
-                _logger.LogInformation("GetExchangeRates: Getting list of exchange rates from {CNBURL}", _url);
-                var response = await _httpClient.GetAsync(_url);
-                response.EnsureSuccessStatusCode();
-
-                var responseString = await response.Content.ReadAsStringAsync();
-                var doc = XDocument.Parse(responseString);
-
                 _logger.LogInformation("GetExchangeRates: Calculating exchange rates for {CurrencyCodes}", string.Join(",", currencyCodes));
-                var rates = doc.Descendants("radek")
-                    .Where(attr => currencyCodes.Contains(attr.GetExchangeCode()))
-                    .Select(attr => new ExchangeRate(
-                            new(DefaultExchangeCode),
-                            new(attr.GetExchangeCode()),
-                            attr.GetExchangeRate() / attr.GetExchangeAmount())
-                    );
+
+                var rates = cachedRates
+                    .Where(rate => currencyCodes.Contains(rate.TargetCurrency.Code));
 
                 return rates;
             }

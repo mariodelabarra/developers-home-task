@@ -25,6 +25,7 @@ namespace ExchangeRateUpdater
                     services.AddTransient<IExchangeRateProvider, ExchangeRateProvider>();
                     services.AddTransient<IExchangeRateRunner, ExchangeRateRunner>();
 
+                    services.AddMemoryCache();
                     services.AddHttpClient();
                 })
                 .ConfigureLogging(logging =>
